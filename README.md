@@ -2,7 +2,7 @@
 
 A shell script to pull the `libc` and `ld-linux` loader file from a Docker image. Useful for pwn.
 
-It detects the use of a [redpwn's jail](https://github.com/redpwn/jail) container and grabs the correct libc (the one that applies to the challenge file in /srv).
+It detects the use of a [redpwn jail](https://github.com/redpwn/jail) container and grabs the correct libc (the one that applies to the challenge file in /srv).
 
 # Install
 ```sh
