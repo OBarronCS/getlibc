@@ -1,0 +1,102 @@
+#!/bin/sh
+set -e
+
+showHelp() {
+cat << EOF
+$0 <Dockerfile path or image name>
+
+Pass the path of a Dockerfile (if omitted, looks for ./Dockerfile).
+
+EOF
+}
+
+usage() { 
+    echo "Usage: $0 [-f|--file <filename>] [--image <image_name>]" 
+}
+
+DOCKERFILE="./Dockerfile"
+DOCKER_IMAGE_NAME=""
+
+while [ "$1" != "" ]; do
+  case $1 in
+    -f | --file ) shift
+                  DOCKERFILE=$1
+                  ;;
+    --image )     shift
+                  DOCKER_IMAGE_NAME=$1
+                  ;;
+    * )           echo "Usage: $0 [-f|--file <filename>] [--image <image_name>]"
+                  exit 1
+  esac
+  shift
+done
+
+
+if [ -z "$DOCKER_IMAGE_NAME" ];
+then
+    # Check if file argument is provided
+    if [ -f "$DOCKERFILE" ]; then
+        # Create random docker image name
+        DOCKER_IMAGE_NAME=$(tr -dc 'a-z' < /dev/urandom | head -c 10)
+        CONTEXT_DIRECTORY=$(dirname "$DOCKERFILE")
+        
+        echo "Building Dockerfile: $DOCKERFILE. Giving it random name '$DOCKER_IMAGE_NAME'"
+        docker build -f $DOCKERFILE -t $DOCKER_IMAGE_NAME $CONTEXT_DIRECTORY
+    else
+        echo "File does not exist: $DOCKERFILE"
+        exit 1
+    fi
+fi
+
+COMMAND=$(cat << 'EOF'
+
+if [ -f "/srv/app/run" ] && [ -f "/jail/nsjail" ];
+then
+    echo -e "\033[0;31mDETECTED REDPWN JAIL\033[0m"
+    
+    JAIL_LIBC_COMMAND=$(cat <<- 'EOT'
+        JAIL_LIBC_LINE=$(ldd /bin/cat | grep -m 1 "libc.so.6")
+        JAIL_LIBC_PATH=$(echo "$JAIL_LIBC_LINE" | awk '{print $3}')
+        echo $(readlink -f $JAIL_LIBC_PATH)
+EOT
+    )
+
+    LIBC_PATH=$(echo "$JAIL_LIBC_COMMAND" | chroot /srv /bin/sh) 
+    
+    echo "Copying libc from "/srv/$LIBC_PATH""
+    cp --no-clobber "/srv/$LIBC_PATH" /mounted/$(basename $LIBC_PATH)
+
+    JAIL_LOADER_COMMAND=$(cat <<- 'EOT'
+        LD_LINE=$(ldd /bin/cat | grep -m 1 "ld-linux")
+        LD_PATH=$(echo "$LD_LINE" | awk '{print $1}')
+        echo $(readlink -f $LD_PATH)
+EOT
+    )
+
+    LOADER_PATH=$(echo "$JAIL_LOADER_COMMAND" | chroot /srv /bin/sh) 
+
+    echo "Copying loader from "/srv/$LOADER_PATH""
+    cp --no-clobber "/srv/$LOADER_PATH" /mounted/$(basename $LOADER_PATH)
+
+else
+    LIBC_LINE=$(ldd /bin/cat | grep -m 1 "libc.so.6")
+    LIBC_PATH=$(echo "$LIBC_LINE" | awk '{print $3}')
+
+    echo "Copying libc from $LIBC_PATH"
+    cp --no-clobber -L $LIBC_PATH /mounted/$(basename $LIBC_PATH)
+
+    LD_LINE=$(ldd /bin/cat | grep -m 1 "ld-linux")
+    LD_PATH=$(echo "$LD_LINE" | awk '{print $1}')
+
+    echo "Copying loader from $LD_PATH"
+    cp --no-clobber -L $LD_PATH /mounted/$(basename $LD_PATH)
+fi
+EOF
+
+)
+
+echo "Creating temporary container for image '$DOCKER_IMAGE_NAME' to grab the libc and ld file"
+
+echo "$COMMAND" | docker run --rm -i -v $(pwd):/mounted "$DOCKER_IMAGE_NAME" /bin/sh
+
+
