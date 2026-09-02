@@ -10,12 +10,9 @@ Pass the path of a Dockerfile (if omitted, looks for ./Dockerfile).
 EOF
 }
 
-usage() { 
-    echo "Usage: $0 [-f|--file <filename>] [--image <image_name>]" 
-}
-
 DOCKERFILE="./Dockerfile"
 DOCKER_IMAGE_NAME=""
+NO_CHOWN=""
 
 while [ "$1" != "" ]; do
   case $1 in
@@ -25,7 +22,10 @@ while [ "$1" != "" ]; do
     --image )     shift
                   DOCKER_IMAGE_NAME=$1
                   ;;
-    * )           echo "Usage: $0 [-f|--file <filename>] [--image <image_name>]"
+    -n )
+                  NO_CHOWN="1"
+                  ;;
+    * )           echo "Usage: $0 [-f|--file <filename>] [--image <image_name>] [-n (to not prompt to chown)]"
                   exit 1
   esac
   shift
@@ -52,7 +52,7 @@ COMMAND=$(cat << 'EOF'
 
 if [ -f "/srv/app/run" ] && [ -f "/jail/nsjail" ];
 then
-    echo -e "\033[0;31mDETECTED REDPWN JAIL\033[0m"
+    echo -e "\033[0;31mDETECTED REDPWN JAIL\033[0m" 1>&2
     
     JAIL_LIBC_COMMAND=$(cat <<- 'EOT'
         JAIL_LIBC_LINE=$(ldd /bin/cat | grep -m 1 "libc.so.6")
@@ -63,8 +63,8 @@ EOT
 
     LIBC_PATH=$(echo "$JAIL_LIBC_COMMAND" | chroot /srv /bin/sh) 
     
-    echo "Copying libc from "/srv/$LIBC_PATH""
-    cp --no-clobber "/srv/$LIBC_PATH" /mounted/$(basename $LIBC_PATH)
+    echo "Copying libc from "/srv/$LIBC_PATH"" 1>&2
+    cp --no-clobber "/srv/$LIBC_PATH" /mounted/$(basename "$LIBC_PATH")
 
     JAIL_LOADER_COMMAND=$(cat <<- 'EOT'
         LD_LINE=$(ldd /bin/cat | grep -m 1 "ld-linux")
@@ -75,28 +75,55 @@ EOT
 
     LOADER_PATH=$(echo "$JAIL_LOADER_COMMAND" | chroot /srv /bin/sh) 
 
-    echo "Copying loader from "/srv/$LOADER_PATH""
-    cp --no-clobber "/srv/$LOADER_PATH" /mounted/$(basename $LOADER_PATH)
+    echo "Copying loader from "/srv/$LOADER_PATH"" 1>&2
+    cp --no-clobber "/srv/$LOADER_PATH" /mounted/$(basename "$LOADER_PATH")
+
+    RESULT_LIBC=$(basename $LIBC_PATH)
+    RESULT_LOADER=$(basename $LOADER_PATH)
 
 else
     LIBC_LINE=$(ldd /bin/cat | grep -m 1 "libc.so.6")
     LIBC_PATH=$(echo "$LIBC_LINE" | awk '{print $3}')
 
-    echo "Copying libc from $LIBC_PATH"
-    cp --no-clobber -L $LIBC_PATH /mounted/$(basename $LIBC_PATH)
+    echo "Copying libc from $LIBC_PATH" 1>&2
+    cp --no-clobber -L $LIBC_PATH /mounted/$(basename "$LIBC_PATH")
 
     LD_LINE=$(ldd /bin/cat | grep -m 1 "ld-linux")
     LD_PATH=$(echo "$LD_LINE" | awk '{print $1}')
 
-    echo "Copying loader from $LD_PATH"
-    cp --no-clobber -L $LD_PATH /mounted/$(basename $LD_PATH)
+    echo "Copying loader from $LD_PATH" 1>&2
+    cp --no-clobber -L $LD_PATH /mounted/$(basename "$LD_PATH")
+
+    RESULT_LIBC=$(basename "$LIBC_PATH")
+    RESULT_LOADER=$(basename "$LD_PATH")
 fi
+
+echo "$RESULT_LIBC"
+echo "$RESULT_LOADER"
 EOF
 
 )
 
-echo "Creating temporary container for image '$DOCKER_IMAGE_NAME' to grab the libc and ld file"
+echo "Creating temporary container for image '$DOCKER_IMAGE_NAME' to grab the libc and ld file" 1>&2
 
-echo "$COMMAND" | docker run --rm -i -v $(pwd):/mounted "$DOCKER_IMAGE_NAME" /bin/sh
+FILE_NAMES=$(echo "$COMMAND" | docker run --rm -i -v $(pwd):/mounted "$DOCKER_IMAGE_NAME" /bin/sh)
 
+echo "Found the following files:"
+printf '%s\n' "$FILE_NAMES" |
+while IFS= read -r file; do
+    echo "  $file"
+done
+
+
+if [ -z "$NO_CHOWN" ];
+then
+    echo "Running chown to correct file permissions"
+
+    printf '%s\n' "$FILE_NAMES" |
+    while IFS= read -r file; do
+        printf 'Running: sudo chown "%s:%s" "%s"\n' "$(id -un)" "$(id -gn)" "$file"
+
+        sudo chown "$(id -un):$(id -gn)" "$file"
+    done
+fi
 
